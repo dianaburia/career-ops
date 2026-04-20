@@ -69,6 +69,17 @@ function detectApi(company) {
     };
   }
 
+  // Workday — public URL pattern: {tenant}.{shard}.myworkdayjobs.com/[en-US/]{site}
+  const workdayMatch = url.match(/\/\/([\w-]+)\.(wd\d+)\.myworkdayjobs\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?([\w_-]+)/);
+  if (workdayMatch) {
+    const [, tenant, shard, site] = workdayMatch;
+    return {
+      type: 'workday',
+      url: `https://${tenant}.${shard}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/jobs`,
+      publicBase: `https://${tenant}.${shard}.myworkdayjobs.com/${site}`,
+    };
+  }
+
   return null;
 }
 
@@ -120,17 +131,88 @@ async function fetchJson(url) {
   }
 }
 
+async function fetchJsonPost(url, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Workday paginates via offset. Server caps limit at 20 per request.
+// Cap at ~500 jobs per company to keep scans fast.
+async function fetchAllWorkdayJobs(apiUrl, publicBase, companyName) {
+  const jobs = [];
+  const limit = 20;
+  const MAX_PAGES = 25;
+  let offset = 0;
+  let total = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const json = await fetchJsonPost(apiUrl, { appliedFacets: {}, limit, offset, searchText: '' });
+    const postings = json.jobPostings || [];
+    if (total === null) total = json.total ?? postings.length;
+    for (const p of postings) {
+      jobs.push({
+        title: p.title || '',
+        url: p.externalPath ? `${publicBase}${p.externalPath}` : '',
+        company: companyName,
+        location: p.locationsText || '',
+      });
+    }
+    offset += postings.length;
+    if (postings.length < limit || offset >= total) break;
+  }
+  return jobs;
+}
+
 // ── Title filter ────────────────────────────────────────────────────
 
+// Build a word-boundary regex for a keyword. Adds \b only on edges
+// where the keyword starts/ends with an alphanumeric char, so that
+// "AI" matches "AI Engineer" but NOT "Télétravail" (substring 'ai'),
+// while keywords like ".NET" or "Sr " still work as expected.
+function makeKeywordRegex(kw) {
+  const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const start = /^[a-z0-9]/i.test(kw) ? '\\b' : '';
+  const end = /[a-z0-9]$/i.test(kw) ? '\\b' : '';
+  return new RegExp(`${start}${escaped}${end}`, 'i');
+}
+
 function buildTitleFilter(titleFilter) {
-  const positive = (titleFilter?.positive || []).map(k => k.toLowerCase());
-  const negative = (titleFilter?.negative || []).map(k => k.toLowerCase());
+  const positive = (titleFilter?.positive || []).map(makeKeywordRegex);
+  const negative = (titleFilter?.negative || []).map(makeKeywordRegex);
 
   return (title) => {
-    const lower = title.toLowerCase();
-    const hasPositive = positive.length === 0 || positive.some(k => lower.includes(k));
-    const hasNegative = negative.some(k => lower.includes(k));
+    const hasPositive = positive.length === 0 || positive.some(re => re.test(title));
+    const hasNegative = negative.some(re => re.test(title));
     return hasPositive && !hasNegative;
+  };
+}
+
+// ── Location filter ─────────────────────────────────────────────────
+
+function buildLocationFilter(locationFilter) {
+  if (!locationFilter) return () => true;
+
+  const positive = (locationFilter.positive || []).map(k => k.toLowerCase());
+  const negative = (locationFilter.negative || []).map(k => k.toLowerCase());
+  const allowEmpty = locationFilter.allow_empty === true;
+
+  return (location) => {
+    if (!location || location.trim() === '') return allowEmpty;
+    const lower = location.toLowerCase();
+    if (negative.some(k => lower.includes(k))) return false;
+    if (positive.length === 0) return true;
+    return positive.some(k => lower.includes(k));
   };
 }
 
@@ -264,6 +346,7 @@ async function main() {
   const config = parseYaml(readFileSync(PORTALS_PATH, 'utf-8'));
   const companies = config.tracked_companies || [];
   const titleFilter = buildTitleFilter(config.title_filter);
+  const locationFilter = buildLocationFilter(config.location_filter);
 
   // 2. Filter to enabled companies with detectable APIs
   const targets = companies
@@ -285,20 +368,30 @@ async function main() {
   const date = new Date().toISOString().slice(0, 10);
   let totalFound = 0;
   let totalFiltered = 0;
+  let totalFilteredLocation = 0;
   let totalDupes = 0;
   const newOffers = [];
   const errors = [];
 
   const tasks = targets.map(company => async () => {
-    const { type, url } = company._api;
+    const { type, url, publicBase } = company._api;
     try {
-      const json = await fetchJson(url);
-      const jobs = PARSERS[type](json, company.name);
+      let jobs;
+      if (type === 'workday') {
+        jobs = await fetchAllWorkdayJobs(url, publicBase, company.name);
+      } else {
+        const json = await fetchJson(url);
+        jobs = PARSERS[type](json, company.name);
+      }
       totalFound += jobs.length;
 
       for (const job of jobs) {
         if (!titleFilter(job.title)) {
           totalFiltered++;
+          continue;
+        }
+        if (!locationFilter(job.location)) {
+          totalFilteredLocation++;
           continue;
         }
         if (seenUrls.has(job.url)) {
@@ -335,6 +428,7 @@ async function main() {
   console.log(`Companies scanned:     ${targets.length}`);
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFiltered} removed`);
+  console.log(`Filtered by location:  ${totalFilteredLocation} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
   console.log(`New offers added:      ${newOffers.length}`);
 

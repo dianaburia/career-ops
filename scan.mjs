@@ -23,7 +23,7 @@ const parseYaml = yaml.load;
 
 const PORTALS_PATH = 'portals.yml';
 const SCAN_HISTORY_PATH = 'data/scan-history.tsv';
-const PIPELINE_PATH = 'data/pipeline.md';
+const JOBS_PATH = 'data/jobs.md';
 const APPLICATIONS_PATH = 'data/applications.md';
 
 // Ensure required directories exist (fresh setup)
@@ -230,11 +230,13 @@ function loadSeenUrls() {
     }
   }
 
-  // pipeline.md — extract URLs from checkbox lines
-  if (existsSync(PIPELINE_PATH)) {
-    const text = readFileSync(PIPELINE_PATH, 'utf-8');
-    for (const match of text.matchAll(/- \[[ x]\] (https?:\/\/\S+)/g)) {
-      seen.add(match[1]);
+  // jobs.md — single-file tracker. Extract URLs from every table row.
+  if (existsSync(JOBS_PATH)) {
+    const text = readFileSync(JOBS_PATH, 'utf-8');
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('|')) continue;
+      const urls = line.match(/https?:\/\/[^\s|)]+/g);
+      if (urls) for (const u of urls) seen.add(u);
     }
   }
 
@@ -265,37 +267,41 @@ function loadSeenCompanyRoles() {
   return seen;
 }
 
-// ── Pipeline writer ─────────────────────────────────────────────────
+// ── Jobs tracker writer ─────────────────────────────────────────────
 
-function appendToPipeline(offers) {
+// Escape pipe characters so table rows don't break
+function esc(s) {
+  return String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ').trim();
+}
+
+function appendToJobs(offers, date) {
   if (offers.length === 0) return;
 
-  let text = readFileSync(PIPELINE_PATH, 'utf-8');
-
-  // Find "## Pendientes" section and append after it
-  const marker = '## Pendientes';
-  const idx = text.indexOf(marker);
-  if (idx === -1) {
-    // No Pendientes section — append at end before Procesadas
-    const procIdx = text.indexOf('## Procesadas');
-    const insertAt = procIdx === -1 ? text.length : procIdx;
-    const block = `\n${marker}\n\n` + offers.map(o =>
-      `- [ ] ${o.url} | ${o.company} | ${o.title}`
-    ).join('\n') + '\n\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
-  } else {
-    // Find the end of existing Pendientes content (next ## or end)
-    const afterMarker = idx + marker.length;
-    const nextSection = text.indexOf('\n## ', afterMarker);
-    const insertAt = nextSection === -1 ? text.length : nextSection;
-
-    const block = '\n' + offers.map(o =>
-      `- [ ] ${o.url} | ${o.company} | ${o.title}`
-    ).join('\n') + '\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
+  // Ensure file exists with header
+  if (!existsSync(JOBS_PATH)) {
+    const header = [
+      '# Jobs Tracker',
+      '',
+      'Single-file tracker. Edit the **Status** column to track your applications.',
+      '',
+      '**Status values:** *blank* (new) · `Applied` · `SKIP` · `Responded` · `Interview` · `Offer` · `Rejected` · `Discarded`',
+      '',
+      '| Status | Date | Company | Role | Location | URL | Notes |',
+      '|--------|------|---------|------|----------|-----|-------|',
+      '',
+    ].join('\n');
+    writeFileSync(JOBS_PATH, header, 'utf-8');
   }
 
-  writeFileSync(PIPELINE_PATH, text, 'utf-8');
+  const rows = offers.map(o =>
+    `|  | ${date} | ${esc(o.company)} | ${esc(o.title)} | ${esc(o.location)} | ${o.url} |  |`
+  ).join('\n') + '\n';
+
+  // Append rows at the end of the file
+  let text = readFileSync(JOBS_PATH, 'utf-8');
+  if (!text.endsWith('\n')) text += '\n';
+  text += rows;
+  writeFileSync(JOBS_PATH, text, 'utf-8');
 }
 
 function appendToScanHistory(offers, date) {
@@ -417,7 +423,7 @@ async function main() {
 
   // 5. Write results
   if (!dryRun && newOffers.length > 0) {
-    appendToPipeline(newOffers);
+    appendToJobs(newOffers, date);
     appendToScanHistory(newOffers, date);
   }
 
@@ -447,7 +453,7 @@ async function main() {
     if (dryRun) {
       console.log('\n(dry run — run without --dry-run to save results)');
     } else {
-      console.log(`\nResults saved to ${PIPELINE_PATH} and ${SCAN_HISTORY_PATH}`);
+      console.log(`\nResults saved to ${JOBS_PATH} and ${SCAN_HISTORY_PATH}`);
     }
   }
 

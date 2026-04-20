@@ -2,6 +2,7 @@
 cv.md
 data/applications.md
 data/pipeline.md
+data/jobs.md
 data/scan-history.tsv
 reports/*.md
 !reports/.gitkeep
@@ -38,3 +39,4 @@ bun.lock
 .claude/memory/
 career-dashboard
 package-lock.json
+.playwright-mcp/

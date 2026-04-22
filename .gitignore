@@ -40,3 +40,10 @@ bun.lock
 career-dashboard
 package-lock.json
 .playwright-mcp/
+
+# Telegram bot credentials
+.env
+
+# Launchd / cron run logs
+logs/*
+!logs/.gitkeep

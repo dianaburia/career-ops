@@ -153,9 +153,15 @@ func (m appModel) View() string {
 
 func main() {
 	pathFlag := flag.String("path", ".", "Path to career-ops directory")
+	jobsFlag := flag.Bool("jobs", false, "Use data/jobs.md tracker (simple mode, no reports/scoring)")
 	flag.Parse()
 
 	careerOpsPath := *pathFlag
+
+	if *jobsFlag {
+		runJobs(careerOpsPath)
+		return
+	}
 
 	// Load applications
 	apps := data.ParseApplications(careerOpsPath)
@@ -190,6 +196,88 @@ func main() {
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// --- jobs mode ---
+
+type jobsApp struct {
+	screen        screens.JobsModel
+	careerOpsPath string
+}
+
+func (a *jobsApp) reload() {
+	jobs := data.ParseJobs(a.careerOpsPath)
+	metrics := data.ComputeJobsMetrics(jobs)
+	a.screen = a.screen.WithReloadedData(jobs, metrics)
+}
+
+func (a jobsApp) Init() tea.Cmd { return nil }
+
+func (a jobsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		a.screen.Resize(msg.Width, msg.Height)
+		s, cmd := a.screen.Update(msg)
+		a.screen = s
+		return a, cmd
+
+	case screens.JobsClosedMsg:
+		return a, tea.Quit
+
+	case screens.JobsRefreshMsg:
+		a.reload()
+		return a, nil
+
+	case screens.JobsUpdateStatusMsg:
+		if err := data.UpdateJobStatus(msg.CareerOpsPath, msg.Job, msg.NewStatus); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: status update failed: %v\n", err)
+		}
+		a.reload()
+		return a, nil
+
+	case screens.JobsOpenURLMsg:
+		url := msg.URL
+		return a, func() tea.Msg {
+			var cmd *exec.Cmd
+			switch runtime.GOOS {
+			case "darwin":
+				cmd = exec.Command("open", url)
+			case "linux":
+				cmd = exec.Command("xdg-open", url)
+			case "windows":
+				cmd = exec.Command("cmd", "/c", "start", "", url)
+			default:
+				cmd = exec.Command("xdg-open", url)
+			}
+			_ = cmd.Run()
+			return nil
+		}
+
+	default:
+		s, cmd := a.screen.Update(msg)
+		a.screen = s
+		return a, cmd
+	}
+}
+
+func (a jobsApp) View() string { return a.screen.View() }
+
+func runJobs(careerOpsPath string) {
+	jobs := data.ParseJobs(careerOpsPath)
+	if jobs == nil {
+		fmt.Fprintf(os.Stderr, "Error: could not find jobs.md in %s or %s/data/\n", careerOpsPath, careerOpsPath)
+		os.Exit(1)
+	}
+	metrics := data.ComputeJobsMetrics(jobs)
+	t := theme.NewTheme("auto")
+	screen := screens.NewJobsModel(t, jobs, metrics, careerOpsPath, 120, 40)
+
+	app := jobsApp{screen: screen, careerOpsPath: careerOpsPath}
+	p := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

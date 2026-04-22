@@ -10,14 +10,94 @@
  * Zero Claude API tokens — pure HTTP + JSON.
  *
  * Usage:
- *   node scan.mjs                  # scan all enabled companies
- *   node scan.mjs --dry-run        # preview without writing files
- *   node scan.mjs --company Cohere # scan a single company
+ *   node scan.mjs                     # scan all enabled companies
+ *   node scan.mjs --dry-run           # preview without writing files
+ *   node scan.mjs --company Cohere    # scan a single company
+ *   node scan.mjs --notify-telegram   # send new offers to Telegram (reads .env)
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
 import yaml from 'js-yaml';
 const parseYaml = yaml.load;
+
+// ── Telegram notifier ───────────────────────────────────────────────
+
+const ENV_PATH = '.env';
+const TELEGRAM_MAX_LEN = 4000; // leave headroom under 4096
+
+function loadDotenv() {
+  if (!existsSync(ENV_PATH)) return {};
+  const env = {};
+  for (const line of readFileSync(ENV_PATH, 'utf-8').split('\n')) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/);
+    if (m) env[m[1]] = m[2].trim();
+  }
+  return env;
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildTelegramMessages(offers, date) {
+  if (offers.length === 0) {
+    return [`<b>career-ops scan — ${date}</b>\nNo new jobs today.`];
+  }
+
+  const header = `<b>🆕 ${offers.length} new jobs · ${date}</b>\n`;
+  const blocks = offers.map((o, i) => {
+    const title = escapeHtml(o.title);
+    const company = escapeHtml(o.company);
+    const loc = o.location ? `\n📍 ${escapeHtml(o.location)}` : '';
+    const link = `<a href="${escapeHtml(o.url)}">open →</a>`;
+    return `${i + 1}. <b>${company}</b> — ${title}${loc}\n${link}`;
+  });
+
+  // Chunk into messages under the limit
+  const messages = [];
+  let current = header;
+  for (const block of blocks) {
+    const piece = '\n' + block + '\n';
+    if (current.length + piece.length > TELEGRAM_MAX_LEN) {
+      messages.push(current);
+      current = piece;
+    } else {
+      current += piece;
+    }
+  }
+  if (current.trim()) messages.push(current);
+  return messages;
+}
+
+async function sendTelegramMessage(token, chatId, text) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    }),
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.description || `HTTP ${res.status}`);
+}
+
+async function notifyTelegram_(offers, date) {
+  const env = loadDotenv();
+  const token = env.TELEGRAM_BOT_TOKEN;
+  const chatId = env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    console.error('Telegram: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing in .env — skipping notify');
+    return;
+  }
+  const messages = buildTelegramMessages(offers, date);
+  for (const msg of messages) {
+    await sendTelegramMessage(token, chatId, msg);
+  }
+  console.log(`Telegram: sent ${messages.length} message(s) to chat ${chatId}`);
+}
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -77,6 +157,17 @@ function detectApi(company) {
       type: 'workday',
       url: `https://${tenant}.${shard}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/jobs`,
       publicBase: `https://${tenant}.${shard}.myworkdayjobs.com/${site}`,
+    };
+  }
+
+  // Workday (alt host) — {shard}.myworkdaysite.com/recruiting/{tenant}/{site}
+  const workdaySiteMatch = url.match(/\/\/(wd\d+)\.myworkdaysite\.com\/recruiting\/([\w-]+)\/([\w_-]+)/);
+  if (workdaySiteMatch) {
+    const [, shard, tenant, site] = workdaySiteMatch;
+    return {
+      type: 'workday',
+      url: `https://${shard}.myworkdaysite.com/wday/cxs/${tenant}/${site}/jobs`,
+      publicBase: `https://${shard}.myworkdaysite.com/recruiting/${tenant}/${site}`,
     };
   }
 
@@ -340,6 +431,7 @@ async function parallelFetch(tasks, limit) {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
+  const notifyTelegram = args.includes('--notify-telegram');
   const companyFlag = args.indexOf('--company');
   const filterCompany = companyFlag !== -1 ? args[companyFlag + 1]?.toLowerCase() : null;
 
@@ -425,6 +517,15 @@ async function main() {
   if (!dryRun && newOffers.length > 0) {
     appendToJobs(newOffers, date);
     appendToScanHistory(newOffers, date);
+  }
+
+  // 5b. Telegram notify (opt-in)
+  if (notifyTelegram && !dryRun) {
+    try {
+      await notifyTelegram_(newOffers, date);
+    } catch (err) {
+      console.error('Telegram notify failed:', err.message);
+    }
   }
 
   // 6. Print summary

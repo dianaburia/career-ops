@@ -3,7 +3,10 @@ cv.md
 data/applications.md
 data/pipeline.md
 data/jobs.md
+data/jobs.backup-*.md
+data/jobs2.backup-*.md
 data/scan-history.tsv
+data/jd-archive.md
 reports/*.md
 !reports/.gitkeep
 output/*
@@ -26,6 +29,7 @@ modes/_profile.md
 
 # Generated
 .resolved-prompt-*
+SESSION_RECAP.md
 node_modules/
 bun.lock
 

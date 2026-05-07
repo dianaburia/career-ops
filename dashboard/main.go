@@ -154,12 +154,17 @@ func (m appModel) View() string {
 func main() {
 	pathFlag := flag.String("path", ".", "Path to career-ops directory")
 	jobsFlag := flag.Bool("jobs", false, "Use data/jobs.md tracker (simple mode, no reports/scoring)")
+	jobs2Flag := flag.Bool("jobs2", false, "Use data/jobs2.md snapshot (simple mode, no reports/scoring)")
 	flag.Parse()
 
 	careerOpsPath := *pathFlag
 
-	if *jobsFlag {
-		runJobs(careerOpsPath)
+	if *jobsFlag || *jobs2Flag {
+		jobsFile := "jobs.md"
+		if *jobs2Flag {
+			jobsFile = "jobs2.md"
+		}
+		runJobs(careerOpsPath, jobsFile)
 		return
 	}
 
@@ -207,10 +212,11 @@ func main() {
 type jobsApp struct {
 	screen        screens.JobsModel
 	careerOpsPath string
+	jobsFile      string
 }
 
 func (a *jobsApp) reload() {
-	jobs := data.ParseJobs(a.careerOpsPath)
+	jobs := data.ParseJobsFile(a.careerOpsPath, a.jobsFile)
 	metrics := data.ComputeJobsMetrics(jobs)
 	a.screen = a.screen.WithReloadedData(jobs, metrics)
 }
@@ -233,7 +239,7 @@ func (a jobsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case screens.JobsUpdateStatusMsg:
-		if err := data.UpdateJobStatus(msg.CareerOpsPath, msg.Job, msg.NewStatus); err != nil {
+		if err := data.UpdateJobStatusFile(msg.CareerOpsPath, a.jobsFile, msg.Job, msg.NewStatus); err != nil {
 			fmt.Fprintf(os.Stderr, "WARN: status update failed: %v\n", err)
 		}
 		a.reload()
@@ -266,17 +272,17 @@ func (a jobsApp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (a jobsApp) View() string { return a.screen.View() }
 
-func runJobs(careerOpsPath string) {
-	jobs := data.ParseJobs(careerOpsPath)
+func runJobs(careerOpsPath, jobsFile string) {
+	jobs := data.ParseJobsFile(careerOpsPath, jobsFile)
 	if jobs == nil {
-		fmt.Fprintf(os.Stderr, "Error: could not find jobs.md in %s or %s/data/\n", careerOpsPath, careerOpsPath)
+		fmt.Fprintf(os.Stderr, "Error: could not find %s in %s or %s/data/\n", jobsFile, careerOpsPath, careerOpsPath)
 		os.Exit(1)
 	}
 	metrics := data.ComputeJobsMetrics(jobs)
 	t := theme.NewTheme("auto")
 	screen := screens.NewJobsModel(t, jobs, metrics, careerOpsPath, 120, 40)
 
-	app := jobsApp{screen: screen, careerOpsPath: careerOpsPath}
+	app := jobsApp{screen: screen, careerOpsPath: careerOpsPath, jobsFile: jobsFile}
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
